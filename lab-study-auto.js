@@ -31,6 +31,8 @@
     lastSeconds: -1,
     lastProgressAt: Date.now(),
     timer: null,
+    modalObserver: null,
+    handlingModal: false,
   };
 
   const panel = document.createElement("div");
@@ -78,6 +80,7 @@
   function stop(message = "已停止。", level = "stopped") {
     state.stopped = true;
     clearInterval(state.timer);
+    state.modalObserver?.disconnect();
     report(message, level, true);
     pauseButton.disabled = true;
     window.labStudyAutoNext = null;
@@ -122,29 +125,38 @@
   }
 
   function visibleModal() {
-    return [...document.querySelectorAll(".ivu-modal-wrap")]
+    return [...document.querySelectorAll(".ivu-modal-confirm, .ivu-modal-wrap")]
       .find(modal => getComputedStyle(modal).display !== "none" &&
+        getComputedStyle(modal).visibility !== "hidden" &&
         !modal.classList.contains("ivu-modal-hidden") &&
         modal.getBoundingClientRect().width > 0);
   }
 
   async function handleModal() {
+    if (state.stopped) return false;
+    if (state.handlingModal) return true;
     const modal = visibleModal();
     if (!modal) return false;
-    const message = modal.textContent;
-    if (message.includes("你已经在此页面") && message.includes("秒后自动退出")) {
-      const confirm = [...modal.querySelectorAll("button")]
-        .find(button => button.textContent.trim() === "确定");
-      if (confirm) {
-        confirm.click();
-        state.lastProgressAt = Date.now();
-        report("已处理平台的空闲继续提示，正在等待计时恢复。", "running", true);
-        await sleep(500);
-        return true;
+    state.handlingModal = true;
+    try {
+      const message = modal.textContent.replace(/\s+/g, "");
+      if (message.includes("你已经在此页面") && message.includes("秒后自动退出")) {
+        const confirm = modal.querySelector(".ivu-modal-confirm-footer button.ivu-btn-primary") ||
+          [...modal.querySelectorAll("button")]
+            .find(button => /^(确定|Confirm)$/i.test(button.textContent.trim()));
+        if (confirm) {
+          confirm.click();
+          state.lastProgressAt = Date.now();
+          report("已确认平台的空闲提示，正在等待计时恢复。", "running", true);
+          await sleep(500);
+          return true;
+        }
       }
+      pause("页面出现了未识别的确认框。请手动处理，再点“继续”。");
+      return true;
+    } finally {
+      state.handlingModal = false;
     }
-    pause("页面出现了未识别的确认框。请手动处理，再点“继续”。");
-    return true;
   }
 
   function currentTimes() {
@@ -333,6 +345,14 @@
       lastProgressAt: new Date(state.lastProgressAt).toLocaleString()
     })
   };
+  state.modalObserver = new MutationObserver(() => {
+    if (state.stopped || state.paused || !visibleModal()) return;
+    void handleModal().catch(error => {
+      pause(`处理页面提示时出错：${error.message}`);
+      console.error("[学习自动切换]", error);
+    });
+  });
+  state.modalObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
   report("请选择起始章节。");
   void chooseStartingChapter().then(started => {
     if (!started || state.stopped) return;
